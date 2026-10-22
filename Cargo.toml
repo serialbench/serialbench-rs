@@ -1,0 +1,14 @@
+[package]
+name = "serialbench-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust harness of the cross-language serialbench family — canonical fixtures, shared data schema"
+license = "BSD-2-Clause"
+
+[dependencies]
+leptris = "1.4"
+yeptris = "0.6"
+teptris = "0.1"
+
+[profile.release]
+opt-level = 3

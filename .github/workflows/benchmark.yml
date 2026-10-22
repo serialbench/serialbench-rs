@@ -1,0 +1,224 @@
+name: benchmark-weekly
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - '**.md'
+  schedule:
+    # Run benchmarks weekly on Sundays at 3 AM UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "rs-site-deploy"
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      platforms: ${{ steps.set-matrix.outputs.platforms }}
+      run-date: ${{ steps.set-matrix.outputs.run-date }}
+    steps:
+      - name: Set matrix configurations
+        id: set-matrix
+        run: |
+          echo 'platforms=["ubuntu-24.04", "ubuntu-24.04-arm", "macos-26"]' >> $GITHUB_OUTPUT
+          echo "run-date=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+  benchmark:
+    runs-on: ${{ matrix.platform }}
+    needs: setup
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.setup.outputs.platforms) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          if command -v apt-get >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y cmake build-essential
+          elif command -v brew >/dev/null; then
+            brew install cmake
+          fi
+
+      - name: Build tris engines from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tris-libs
+          for repo in leptris yeptris teptris; do
+            git clone -q --depth 1 "https://github.com/leptris/${repo}.git" "/tmp/${repo}"
+            up=$(echo "${repo}" | tr 'a-z' 'A-Z')
+            extra=""
+            [ "${repo}" = "leptris" ] && extra="-DLEPTRIS_ENABLE_UTF8PROC=OFF -DLEPTRIS_ENABLE_ICONV=OFF"
+            # shellcheck disable=SC2086
+            cmake -S "/tmp/${repo}" -B "/tmp/${repo}-build" -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=OFF -DCMAKE_C_STANDARD=11 \
+              -D${up}_ENABLE_LTO=OFF -D${up}_BUILD_CLI=OFF -D${up}_BUILD_STATIC=OFF \
+              -D${up}_BUILD_SHARED=ON $extra > /dev/null
+            cmake --build "/tmp/${repo}-build" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" > /dev/null
+            find "/tmp/${repo}-build" -name "lib${repo}*dylib" -o -name "lib${repo}*.so" | while read -r lib; do
+              cp "$lib" /tmp/tris-libs/ 2>/dev/null || true
+            done
+          done
+          ls /tmp/tris-libs/
+
+      - name: Build harness
+        shell: bash
+        env:
+          LEPTRIS_LIB_PATH: ${{ runner.os == 'macOS' && '/tmp/tris-libs/libleptris.dylib' || '/tmp/tris-libs/libleptris.so' }}
+          YEPTRIS_LIB_PATH: ${{ runner.os == 'macOS' && '/tmp/tris-libs/libyeptris.dylib' || '/tmp/tris-libs/libyeptris.so' }}
+          TEPTRIS_LIB_PATH: ${{ runner.os == 'macOS' && '/tmp/tris-libs/libteptris.dylib' || '/tmp/tris-libs/libteptris.so' }}
+          RUSTFLAGS: -C link-arg=-Wl,-rpath,/tmp/tris-libs
+        run: cargo build --release
+
+      - name: Load canonical fixtures
+        run: |
+          git clone --depth 1 https://github.com/serialbench/fixtures.git fixtures
+          (cd fixtures && sha256sum -c SHA256SUMS) || (cd fixtures && shasum -a 256 -c SHA256SUMS)
+
+      - name: Benchmark xml
+        continue-on-error: true
+        shell: bash
+        env:
+          SERIALBENCH_PLATFORM: ${{ matrix.platform }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_RUN_DATE: ${{ needs.setup.outputs.run-date }}
+        run: |
+          export RUSTC_VERSION="$(rustc --version | awk '{print $2}')"
+          if [ "${{ github.run_attempt }}" -gt 1 ] && .github/scripts/format-status.sh xml "$RUSTC_VERSION" "${{ matrix.platform }}"; then
+            echo "xml already in the data repo — skipping (gap-filling rerun)"
+            exit 0
+          fi
+          mkdir -p results/xml
+          ./target/release/serialbench-rs fixtures results/xml/results.yaml xml
+
+      - name: Upload xml
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.platform }}-rust-xml
+          path: results/xml
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Push xml to data repo
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          RUSTC_VERSION_FILE: results/xml/.rustc-version
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_RUN_DATE: ${{ needs.setup.outputs.run-date }}
+        run: |
+          export RUSTC_VERSION="$(rustc --version | awk '{print $2}')"
+          .github/scripts/push-to-data.sh xml "$RUSTC_VERSION" "${{ matrix.platform }}"
+
+      - name: Benchmark yaml
+        continue-on-error: true
+        shell: bash
+        env:
+          SERIALBENCH_PLATFORM: ${{ matrix.platform }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_RUN_DATE: ${{ needs.setup.outputs.run-date }}
+        run: |
+          export RUSTC_VERSION="$(rustc --version | awk '{print $2}')"
+          if [ "${{ github.run_attempt }}" -gt 1 ] && .github/scripts/format-status.sh yaml "$RUSTC_VERSION" "${{ matrix.platform }}"; then
+            echo "yaml already in the data repo — skipping (gap-filling rerun)"
+            exit 0
+          fi
+          mkdir -p results/yaml
+          ./target/release/serialbench-rs fixtures results/yaml/results.yaml yaml
+
+      - name: Upload yaml
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.platform }}-rust-yaml
+          path: results/yaml
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Push yaml to data repo
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_RUN_DATE: ${{ needs.setup.outputs.run-date }}
+        run: |
+          export RUSTC_VERSION="$(rustc --version | awk '{print $2}')"
+          .github/scripts/push-to-data.sh yaml "$RUSTC_VERSION" "${{ matrix.platform }}"
+
+      - name: Benchmark toml
+        continue-on-error: true
+        shell: bash
+        env:
+          SERIALBENCH_PLATFORM: ${{ matrix.platform }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_RUN_DATE: ${{ needs.setup.outputs.run-date }}
+        run: |
+          export RUSTC_VERSION="$(rustc --version | awk '{print $2}')"
+          if [ "${{ github.run_attempt }}" -gt 1 ] && .github/scripts/format-status.sh toml "$RUSTC_VERSION" "${{ matrix.platform }}"; then
+            echo "toml already in the data repo — skipping (gap-filling rerun)"
+            exit 0
+          fi
+          mkdir -p results/toml
+          ./target/release/serialbench-rs fixtures results/toml/results.yaml toml
+
+      - name: Upload toml
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.platform }}-rust-toml
+          path: results/toml
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Push toml to data repo
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_RUN_DATE: ${{ needs.setup.outputs.run-date }}
+        run: |
+          export RUSTC_VERSION="$(rustc --version | awk '{print $2}')"
+          .github/scripts/push-to-data.sh toml "$RUSTC_VERSION" "${{ matrix.platform }}"
+
+      - name: Verify leg completeness
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          DATA_RUN_DATE: ${{ needs.setup.outputs.run-date }}
+        run: |
+          export RUSTC_VERSION="$(rustc --version | awk '{print $2}')"
+          MISSING=""
+          for FMT in xml yaml toml; do
+            if .github/scripts/format-status.sh "$FMT" "$RUSTC_VERSION" "${{ matrix.platform }}"; then
+              echo "$FMT: in data repo"
+            else
+              echo "$FMT: MISSING from data repo"
+              MISSING="$MISSING $FMT"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::formats never pushed:${MISSING} — failing the leg so autoheal fills the gap"
+            exit 1
+          fi
