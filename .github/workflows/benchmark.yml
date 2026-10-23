@@ -72,7 +72,9 @@ jobs:
               -D${up}_ENABLE_LTO=OFF -D${up}_BUILD_CLI=OFF -D${up}_BUILD_STATIC=OFF \
               -D${up}_BUILD_SHARED=ON $extra > /dev/null
             cmake --build "/tmp/${repo}-build" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" > /dev/null
-            find "/tmp/${repo}-build" -name "lib${repo}*dylib" -o -name "lib${repo}*.so" | while read -r lib; do
+            # .so* covers the soname file (libteptris.so.0) the binary
+            # records at runtime; dylib covers the mac versioned names.
+            find "/tmp/${repo}-build" \( -name "lib${repo}*.so*" -o -name "lib${repo}*dylib" \) -type f | while read -r lib; do
               cp "$lib" /tmp/tris-libs/ 2>/dev/null || true
             done
           done
