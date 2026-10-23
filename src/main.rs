@@ -62,6 +62,32 @@ fn read_fixture(dir: &str, size: &str, ext: &str) -> Option<Vec<u8>> {
     std::fs::read(format!("{dir}/{size}.{ext}")).ok()
 }
 
+fn bench_json(ctx: &mut Ctx, dir: &str, size_idx: usize) {
+    let size = ctx.sizes[size_idx];
+    let Some(data) = read_fixture(dir, size, "json") else {
+        eprintln!("missing {size}.json");
+        return;
+    };
+    ctx.bench("serde-json", "json", "parsing", size_idx, || {
+        let _v: serde_json::Value = serde_json::from_slice(&data).expect("json parse");
+    });
+    ctx.bench("serde-json", "json", "generation", size_idx, || {
+        let v: serde_json::Value = serde_json::from_slice(&data).expect("json parse");
+        let _s = serde_json::to_string(&v).expect("json emit");
+    });
+    ctx.bench("simd-json", "json", "parsing", size_idx, || {
+        // to_owned_value takes &mut [u8]: the API's in-situ parse on an
+        // owned copy of the input.
+        let mut buf = data.clone();
+        let _v = simd_json::to_owned_value(&mut buf).expect("simd json parse");
+    });
+    ctx.bench("simd-json", "json", "generation", size_idx, || {
+        let mut buf = data.clone();
+        let v = simd_json::to_owned_value(&mut buf).expect("simd json parse");
+        let _s = v.to_string();
+    });
+}
+
 fn bench_xml(ctx: &mut Ctx, dir: &str, size_idx: usize) {
     let size = ctx.sizes[size_idx];
     let Some(data) = read_fixture(dir, size, "xml") else {
@@ -81,6 +107,23 @@ fn bench_xml(ctx: &mut Ctx, dir: &str, size_idx: usize) {
             let _hits = doc.xpath(q).expect("xpath");
         }
     });
+    ctx.bench("quick-xml", "xml", "parsing", size_idx, || {
+        use quick_xml::events::Event;
+        let mut reader = quick_xml::Reader::from_str(std::str::from_utf8(&data).expect("utf8"));
+        let mut events = 0;
+        loop {
+            match reader.read_event() {
+                Ok(Event::Eof) => break,
+                Ok(_) => events += 1,
+                Err(e) => panic!("quick-xml parse: {e}"),
+            }
+        }
+        assert!(events > 0, "quick-xml: no events");
+    });
+    ctx.bench("roxmltree", "xml", "parsing", size_idx, || {
+        let doc = roxmltree::Document::parse(std::str::from_utf8(&data).expect("utf8")).expect("roxmltree parse");
+        assert!(doc.descendants().next().is_some());
+    });
 }
 
 fn bench_yaml(ctx: &mut Ctx, dir: &str, size_idx: usize) {
@@ -96,6 +139,16 @@ fn bench_yaml(ctx: &mut Ctx, dir: &str, size_idx: usize) {
         let doc = yeptris::Document::parse(&data).expect("yaml parse");
         let _out = doc.serialize_string().expect("yaml serialize");
     });
+    ctx.bench("yaml-rust2", "yaml", "parsing", size_idx, || {
+        let _docs = yaml_rust2::YamlLoader::load_from_str(std::str::from_utf8(&data).expect("utf8")).expect("yaml parse");
+    });
+    ctx.bench("yaml-rust2", "yaml", "generation", size_idx, || {
+        let docs = yaml_rust2::YamlLoader::load_from_str(std::str::from_utf8(&data).expect("utf8")).expect("yaml parse");
+        let mut out = String::new();
+        yaml_rust2::YamlEmitter::new(&mut out)
+            .dump(&docs[0])
+            .expect("yaml emit");
+    });
 }
 
 fn bench_toml(ctx: &mut Ctx, dir: &str, size_idx: usize) {
@@ -110,6 +163,13 @@ fn bench_toml(ctx: &mut Ctx, dir: &str, size_idx: usize) {
     ctx.bench("teptris", "toml", "generation", size_idx, || {
         let v = teptris::loads(&data).expect("toml parse");
         let _out = teptris::dump(&v).expect("toml dump");
+    });
+    ctx.bench("toml", "toml", "parsing", size_idx, || {
+        let _v: toml::Value = toml::from_str(std::str::from_utf8(&data).expect("utf8")).expect("toml parse");
+    });
+    ctx.bench("toml", "toml", "generation", size_idx, || {
+        let v: toml::Value = toml::from_str(std::str::from_utf8(&data).expect("utf8")).expect("toml parse");
+        let _s = toml::to_string(&v).expect("toml emit");
     });
 }
 
@@ -167,6 +227,10 @@ fn main() {
             Some("toml") | None => bench_toml(&mut ctx_inner.borrow_mut(), fixtures, size_idx),
             _ => {}
         }
+        match want {
+            Some("json") | None => bench_json(&mut ctx_inner.borrow_mut(), fixtures, size_idx),
+            _ => {}
+        }
     }
 
     let ctx = ctx_inner.into_inner();
@@ -183,13 +247,23 @@ fn main() {
     let _ = writeln!(out, "  runtime_version: {rustc}");
     out.push_str("benchmark_config:\n");
     out.push_str("  name: rust-full\n");
-    out.push_str("  formats: [xml, yaml, toml]\n");
+    out.push_str("  formats: [json, xml, yaml, toml]\n");
     out.push_str("  operations: [parsing, generation, xpath]\n");
     out.push_str("benchmark_result:\n");
     out.push_str("  serializers:\n");
     let _ = writeln!(out, "    - {{name: leptris, format: xml, version: '{}', features: {{xpath: true}}}}", leptris_bench::VERSION);
     let _ = writeln!(out, "    - {{name: yeptris, format: yaml, version: '0.6.3', features: {{}}}}");
     let _ = writeln!(out, "    - {{name: teptris, format: toml, version: '0.1.6', features: {{}}}}");
+    for (name, fmt, ver) in [
+        ("serde-json", "json", "1.0.154"),
+        ("simd-json", "json", "0.18.1"),
+        ("quick-xml", "xml", "0.42.0"),
+        ("roxmltree", "xml", "0.21.1"),
+        ("yaml-rust2", "yaml", "0.13.0"),
+        ("toml", "toml", "1.1.8"),
+    ] {
+        let _ = writeln!(out, "    - {{name: {name}, format: {fmt}, version: '{ver}', features: {{}}}}");
+    }
     for op in ["parsing", "generation", "xpath"] {
         out.push_str(&format!("  {op}:\n"));
         for row in &ctx.rows {
