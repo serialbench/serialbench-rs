@@ -10,7 +10,7 @@ use std::time::Instant;
 
 mod leptris_bench {
     // Adapter version, kept in lockstep with the Cargo.toml dependency.
-    pub const VERSION: &str = "1.4.1";
+    pub const VERSION: &str = "1.9.0";
     pub const XPATH_QUERIES: [&str; 3] = [
         "//user | //record",
         "//user[@id='101']",
@@ -85,6 +85,15 @@ fn bench_json(ctx: &mut Ctx, dir: &str, size_idx: usize) {
         let mut buf = data.clone();
         let v = simd_json::to_owned_value(&mut buf).expect("simd json parse");
         let _s = v.to_string();
+    });
+    // yeptris's json face (crate 0.6.78+): Value parse + serialize
+    let json_str = std::str::from_utf8(&data).expect("utf8 json");
+    ctx.bench("yeptris-json", "json", "parsing", size_idx, || {
+        let _v = yeptris::json::parse(json_str).expect("yeptris json parse");
+    });
+    ctx.bench("yeptris-json", "json", "generation", size_idx, || {
+        let v = yeptris::json::parse(json_str).expect("yeptris json parse");
+        let _s = yeptris::json::serialize(&v).expect("yeptris json emit");
     });
 }
 
@@ -252,8 +261,9 @@ fn main() {
     out.push_str("benchmark_result:\n");
     out.push_str("  serializers:\n");
     let _ = writeln!(out, "    - {{name: leptris, format: xml, version: '{}', features: {{xpath: true}}}}", leptris_bench::VERSION);
-    let _ = writeln!(out, "    - {{name: yeptris, format: yaml, version: '0.6.3', features: {{}}}}");
-    let _ = writeln!(out, "    - {{name: teptris, format: toml, version: '0.1.6', features: {{}}}}");
+    let _ = writeln!(out, "    - {{name: yeptris, format: yaml, version: '{}', features: {{}}}}", yeptris::version());
+    let _ = writeln!(out, "    - {{name: yeptris-json, format: json, version: '{}', features: {{}}}}", yeptris::version());
+    let _ = writeln!(out, "    - {{name: teptris, format: toml, version: '{}', features: {{}}}}", teptris::engine_version());
     for (name, fmt, ver) in [
         ("serde-json", "json", "1.0.154"),
         ("simd-json", "json", "0.18.1"),
