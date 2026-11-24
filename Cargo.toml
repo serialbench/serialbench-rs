@@ -6,9 +6,9 @@ description = "Rust harness of the cross-language serialbench family — canonic
 license = "BSD-2-Clause"
 
 [dependencies]
-leptris = "1.4"
-yeptris = "0.6"
-teptris = "0.1"
+leptris = "1.9.0"
+yeptris = "0.6.78"
+teptris = "0.3.33"
 
 # native-ecosystem competitors
 serde_json = "1"
