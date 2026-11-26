@@ -530,9 +530,9 @@ dependencies = [
 
 [[package]]
 name = "yeptris"
-version = "0.6.78"
+version = "0.6.84"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6b4581866e5a277598ef4fe0b6fef98067b986dc86ed9f7b31964513e7bd20c"
+checksum = "9e9d1521321cc9df3a831cfdf5893011a52abe2051bc8ee213166215fd0e259f"
 dependencies = [
  "serde",
 ]
